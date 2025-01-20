@@ -20,22 +20,23 @@ package kafka.log
 import java.io.File
 import java.nio.file.Files
 import java.util.Properties
-import kafka.server.BrokerTopicStats
 import kafka.utils._
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.compress.Compression
 import org.apache.kafka.common.config.TopicConfig
 import org.apache.kafka.common.record._
 import org.apache.kafka.common.utils.Utils
-import org.apache.kafka.coordinator.transaction.TransactionLogConfigs
+import org.apache.kafka.coordinator.transaction.TransactionLogConfig
 import org.apache.kafka.server.util.MockTime
-import org.apache.kafka.storage.internals.log.{AppendOrigin, LogConfig, LogDirFailureChannel, LogSegment, LogSegments, LogStartOffsetIncrementReason, ProducerStateManager, ProducerStateManagerConfig}
+import org.apache.kafka.storage.internals.log.{AppendOrigin, LocalLog, LogConfig, LogDirFailureChannel, LogLoader, LogSegment, LogSegments, LogStartOffsetIncrementReason, ProducerStateManager, ProducerStateManagerConfig}
+import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.junit.jupiter.api.Assertions._
 import org.junit.jupiter.api.{AfterEach, Test}
 
+import java.lang.{Long => JLong}
 import java.util
+import java.util.concurrent.ConcurrentHashMap
 import scala.collection.mutable
-import scala.compat.java8.OptionConverters._
 
 /**
   * Unit tests for the log cleaning logic
@@ -55,7 +56,7 @@ class LogCleanerManagerTest extends Logging {
   val logConfig: LogConfig = new LogConfig(logProps)
   val time = new MockTime(1400000000000L, 1000L)  // Tue May 13 16:53:20 UTC 2014 for `currentTimeMs`
   val offset = 999
-  val producerStateManagerConfig = new ProducerStateManagerConfig(TransactionLogConfigs.PRODUCER_ID_EXPIRATION_MS_DEFAULT, false)
+  val producerStateManagerConfig = new ProducerStateManagerConfig(TransactionLogConfig.PRODUCER_ID_EXPIRATION_MS_DEFAULT, false)
 
   val cleanerCheckpoints: mutable.Map[TopicPartition, Long] = mutable.Map[TopicPartition, Long]()
 
@@ -66,7 +67,7 @@ class LogCleanerManagerTest extends Logging {
       cleanerCheckpoints.toMap
     }
 
-    override def updateCheckpoints(dataDir: File, partitionToUpdateOrAdd: Option[(TopicPartition,Long)] = None,
+    override def updateCheckpoints(dataDir: File, partitionToUpdateOrAdd: Option[(TopicPartition, JLong)] = None,
                                    partitionToRemove: Option[TopicPartition] = None): Unit = {
       assert(partitionToRemove.isEmpty, "partitionToRemove argument with value not yet handled")
       val (tp, offset) = partitionToUpdateOrAdd.getOrElse(
@@ -106,10 +107,10 @@ class LogCleanerManagerTest extends Logging {
     val logDirFailureChannel = new LogDirFailureChannel(10)
     val config = createLowRetentionLogConfig(logSegmentSize, TopicConfig.CLEANUP_POLICY_COMPACT)
     val maxTransactionTimeoutMs = 5 * 60 * 1000
-    val producerIdExpirationCheckIntervalMs = TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT
+    val producerIdExpirationCheckIntervalMs = TransactionLogConfig.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT
     val segments = new LogSegments(tp)
-    val leaderEpochCache = UnifiedLog.maybeCreateLeaderEpochCache(
-      tpDir, topicPartition, logDirFailureChannel, config.recordVersion, "", None, time.scheduler)
+    val leaderEpochCache = UnifiedLog.createLeaderEpochCache(
+      tpDir, topicPartition, logDirFailureChannel, None, time.scheduler)
     val producerStateManager = new ProducerStateManager(topicPartition, tpDir, maxTransactionTimeoutMs, producerStateManagerConfig, time)
     val offsets = new LogLoader(
       tpDir,
@@ -118,19 +119,21 @@ class LogCleanerManagerTest extends Logging {
       time.scheduler,
       time,
       logDirFailureChannel,
-      hadCleanShutdown = true,
+      true,
       segments,
       0L,
       0L,
-      leaderEpochCache.asJava,
-      producerStateManager
+      leaderEpochCache,
+      producerStateManager,
+      new ConcurrentHashMap[String, Integer],
+      false
     ).load()
     val localLog = new LocalLog(tpDir, config, segments, offsets.recoveryPoint,
       offsets.nextOffsetMetadata, time.scheduler, time, tp, logDirFailureChannel)
     // the exception should be caught and the partition that caused it marked as uncleanable
     class LogMock extends UnifiedLog(offsets.logStartOffset, localLog, new BrokerTopicStats,
         producerIdExpirationCheckIntervalMs, leaderEpochCache,
-        producerStateManager, _topicId = None, keepPartitionMetadataFile = true) {
+        producerStateManager, _topicId = None) {
       // Throw an error in getFirstBatchTimestampForSegments since it is called in grabFilthiestLog()
       override def getFirstBatchTimestampForSegments(segments: util.Collection[LogSegment]): util.Collection[java.lang.Long] =
         throw new IllegalStateException("Error!")
@@ -816,10 +819,9 @@ class LogCleanerManagerTest extends Logging {
       brokerTopicStats = new BrokerTopicStats,
       maxTransactionTimeoutMs = 5 * 60 * 1000,
       producerStateManagerConfig = producerStateManagerConfig,
-      producerIdExpirationCheckIntervalMs = TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT,
+      producerIdExpirationCheckIntervalMs = TransactionLogConfig.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT,
       logDirFailureChannel = new LogDirFailureChannel(10),
-      topicId = None,
-      keepPartitionMetadataFile = true)
+      topicId = None)
   }
 
   private def createLowRetentionLogConfig(segmentSize: Int, cleanupPolicy: String): LogConfig = {
@@ -870,10 +872,9 @@ class LogCleanerManagerTest extends Logging {
       brokerTopicStats = new BrokerTopicStats,
       maxTransactionTimeoutMs = 5 * 60 * 1000,
       producerStateManagerConfig = producerStateManagerConfig,
-      producerIdExpirationCheckIntervalMs = TransactionLogConfigs.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT,
+      producerIdExpirationCheckIntervalMs = TransactionLogConfig.PRODUCER_ID_EXPIRATION_CHECK_INTERVAL_MS_DEFAULT,
       logDirFailureChannel = new LogDirFailureChannel(10),
-      topicId = None,
-      keepPartitionMetadataFile = true
+      topicId = None
     )
   }
 

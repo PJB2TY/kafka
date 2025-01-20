@@ -24,6 +24,7 @@ import org.apache.kafka.common.utils.ByteUtils;
 import org.apache.kafka.common.utils.Crc32C;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.server.log.remote.metadata.storage.generated.ProducerSnapshot;
 
 import org.slf4j.Logger;
@@ -247,9 +248,9 @@ public class ProducerStateManager {
         Optional<LogOffsetMetadata> unreplicatedFirstOffset = Optional.ofNullable(unreplicatedTxns.firstEntry()).map(e -> e.getValue().firstOffset);
         Optional<LogOffsetMetadata> undecidedFirstOffset = Optional.ofNullable(ongoingTxns.firstEntry()).map(e -> e.getValue().firstOffset);
 
-        if (!unreplicatedFirstOffset.isPresent())
+        if (unreplicatedFirstOffset.isEmpty())
             return undecidedFirstOffset;
-        else if (!undecidedFirstOffset.isPresent())
+        else if (undecidedFirstOffset.isEmpty())
             return unreplicatedFirstOffset;
         else if (undecidedFirstOffset.get().messageOffset < unreplicatedFirstOffset.get().messageOffset)
             return undecidedFirstOffset;
@@ -327,7 +328,7 @@ public class ProducerStateManager {
     }
 
     private boolean isProducerExpired(long currentTimeMs, ProducerStateEntry producerState) {
-        return !producerState.currentTxnFirstOffset().isPresent() && currentTimeMs - producerState.lastTimestamp() >= producerStateManagerConfig.producerIdExpirationMs();
+        return producerState.currentTxnFirstOffset().isEmpty() && currentTimeMs - producerState.lastTimestamp() >= producerStateManagerConfig.producerIdExpirationMs();
     }
 
     /**
@@ -684,7 +685,7 @@ public class ProducerStateManager {
         ByteUtils.writeUnsignedInt(buffer, CRC_OFFSET, crc);
 
         try (FileChannel fileChannel = FileChannel.open(file.toPath(), StandardOpenOption.CREATE, StandardOpenOption.WRITE)) {
-            fileChannel.write(buffer);
+            Utils.writeFully(fileChannel, buffer);
             if (sync) {
                 fileChannel.force(true);
             }

@@ -24,6 +24,7 @@ import org.apache.kafka.common.utils.Time
 import org.apache.kafka.server.common.OffsetAndEpoch
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.storage.internals.log.LogAppendInfo
+import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 import org.junit.jupiter.api.Assertions._
 
 import java.util.OptionalInt
@@ -106,7 +107,6 @@ class MockFetcherThread(val mockLeader: MockLeaderEndPoint,
       lastOffset,
       lastEpoch,
       maxTimestamp,
-      shallowOffsetOfMaxTimestamp,
       Time.SYSTEM.milliseconds(),
       state.logStartOffset,
       RecordValidationStats.EMPTY,
@@ -162,6 +162,4 @@ class MockFetcherThread(val mockLeader: MockLeaderEndPoint,
       assertEquals(expectedEpoch, fetchState(partition).flatMap(_.lastFetchedEpoch))
     }
   }
-
-  override protected val isOffsetForLeaderEpochSupported: Boolean = true
 }

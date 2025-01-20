@@ -42,7 +42,6 @@ import org.apache.kafka.common.network.ListenerName;
 import org.apache.kafka.common.protocol.ApiKeys;
 import org.apache.kafka.common.protocol.ApiMessage;
 import org.apache.kafka.common.protocol.Errors;
-import org.apache.kafka.raft.internals.ReplicaKey;
 
 import java.net.InetSocketAddress;
 import java.util.Collection;
@@ -145,11 +144,12 @@ public class RaftUtil {
     public static VoteRequestData singletonVoteRequest(
         TopicPartition topicPartition,
         String clusterId,
-        int candidateEpoch,
-        ReplicaKey candidateKey,
+        int replicaEpoch,
+        ReplicaKey replicaKey,
         ReplicaKey voterKey,
         int lastEpoch,
-        long lastEpochEndOffset
+        long lastEpochEndOffset,
+        boolean preVote
     ) {
         return new VoteRequestData()
             .setClusterId(clusterId)
@@ -162,10 +162,10 @@ public class RaftUtil {
                             Collections.singletonList(
                                 new VoteRequestData.PartitionData()
                                     .setPartitionIndex(topicPartition.partition())
-                                    .setCandidateEpoch(candidateEpoch)
-                                    .setCandidateId(candidateKey.id())
-                                    .setCandidateDirectoryId(
-                                        candidateKey
+                                    .setReplicaEpoch(replicaEpoch)
+                                    .setReplicaId(replicaKey.id())
+                                    .setReplicaDirectoryId(
+                                        replicaKey
                                             .directoryId()
                                             .orElse(ReplicaKey.NO_DIRECTORY_ID)
                                     )
@@ -176,6 +176,7 @@ public class RaftUtil {
                                     )
                                     .setLastOffsetEpoch(lastEpoch)
                                     .setLastOffset(lastEpochEndOffset)
+                                    .setPreVote(preVote)
                             )
                         )
                 )
@@ -193,17 +194,18 @@ public class RaftUtil {
         boolean voteGranted,
         Endpoints endpoints
     ) {
+        VoteResponseData.PartitionData partitionData = new VoteResponseData.PartitionData()
+            .setErrorCode(partitionLevelError.code())
+            .setLeaderId(leaderId)
+            .setLeaderEpoch(leaderEpoch)
+            .setVoteGranted(voteGranted);
+
         VoteResponseData response = new VoteResponseData()
             .setErrorCode(topLevelError.code())
             .setTopics(Collections.singletonList(
                 new VoteResponseData.TopicData()
                     .setTopicName(topicPartition.topic())
-                    .setPartitions(Collections.singletonList(
-                        new VoteResponseData.PartitionData()
-                            .setErrorCode(partitionLevelError.code())
-                            .setLeaderId(leaderId)
-                            .setLeaderEpoch(leaderEpoch)
-                            .setVoteGranted(voteGranted)))));
+                    .setPartitions(Collections.singletonList(partitionData))));
 
         if (apiVersion >= 1) {
             Optional<InetSocketAddress> address = endpoints.address(listenerName);

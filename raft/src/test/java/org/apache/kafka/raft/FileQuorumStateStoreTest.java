@@ -18,9 +18,7 @@ package org.apache.kafka.raft;
 
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.protocol.types.TaggedFields;
-import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.raft.generated.QuorumStateData;
-import org.apache.kafka.raft.internals.ReplicaKey;
 import org.apache.kafka.server.common.KRaftVersion;
 import org.apache.kafka.test.TestUtils;
 
@@ -58,20 +56,28 @@ public class FileQuorumStateStoreTest {
         final int voter1 = 1;
         final int voter2 = 2;
         final int voter3 = 3;
-        Set<Integer> voters = Utils.mkSet(voter1, voter2, voter3);
+        ReplicaKey votedKey = ReplicaKey.of(voter1, Uuid.randomUuid());
+        Set<Integer> voters = Set.of(voter1, voter2, voter3);
 
         stateStore.writeElectionState(
-            ElectionState.withElectedLeader(epoch, voter1, voters),
+            ElectionState.withElectedLeader(epoch, voter1, Optional.of(votedKey), voters),
             kraftVersion
         );
 
         final Optional<ElectionState> expected;
         if (kraftVersion.isReconfigSupported()) {
             expected = Optional.of(
-                ElectionState.withElectedLeader(epoch, voter1, Collections.emptySet())
+                ElectionState.withElectedLeader(epoch, voter1, Optional.of(votedKey), Collections.emptySet())
             );
         } else {
-            expected = Optional.of(ElectionState.withElectedLeader(epoch, voter1, voters));
+            expected = Optional.of(
+                ElectionState.withElectedLeader(
+                    epoch,
+                    voter1,
+                    Optional.of(ReplicaKey.of(voter1, ReplicaKey.NO_DIRECTORY_ID)),
+                    voters
+                )
+            );
         }
 
         assertEquals(expected, stateStore.readElectionState());
@@ -89,7 +95,7 @@ public class FileQuorumStateStoreTest {
         final ReplicaKey voter1Key = ReplicaKey.of(voter1, Uuid.randomUuid());
         final int voter2 = 2;
         final int voter3 = 3;
-        Set<Integer> voters = Utils.mkSet(voter1, voter2, voter3);
+        Set<Integer> voters = Set.of(voter1, voter2, voter3);
 
         stateStore.writeElectionState(
             ElectionState.withVotedCandidate(epoch, voter1Key, voters),
@@ -125,7 +131,7 @@ public class FileQuorumStateStoreTest {
         FileQuorumStateStore stateStore = new FileQuorumStateStore(TestUtils.tempFile());
 
         final int epoch = 2;
-        Set<Integer> voters = Utils.mkSet(1, 2, 3);
+        Set<Integer> voters = Set.of(1, 2, 3);
 
         stateStore.writeElectionState(
             ElectionState.withUnknownLeader(epoch, voters),
@@ -149,7 +155,7 @@ public class FileQuorumStateStoreTest {
         FileQuorumStateStore stateStore = new FileQuorumStateStore(stateFile);
 
         final int epoch = 2;
-        Set<Integer> voters = Utils.mkSet(1, 2, 3);
+        Set<Integer> voters = Set.of(1, 2, 3);
 
         stateStore.writeElectionState(ElectionState.withUnknownLeader(epoch, voters), KRAFT_VERSION_1);
 

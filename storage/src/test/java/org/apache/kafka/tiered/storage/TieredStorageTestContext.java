@@ -44,6 +44,7 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.server.log.remote.storage.LocalTieredStorage;
 import org.apache.kafka.server.log.remote.storage.LocalTieredStorageHistory;
 import org.apache.kafka.server.log.remote.storage.LocalTieredStorageSnapshot;
+import org.apache.kafka.storage.internals.epoch.LeaderEpochFileCache;
 import org.apache.kafka.tiered.storage.specs.ExpandPartitionCountSpec;
 import org.apache.kafka.tiered.storage.specs.TopicSpec;
 import org.apache.kafka.tiered.storage.utils.BrokerLocalStorage;
@@ -67,7 +68,7 @@ import java.util.stream.Collectors;
 import scala.Function0;
 import scala.Function1;
 import scala.Option;
-import scala.collection.JavaConverters;
+import scala.jdk.javaapi.CollectionConverters;
 
 import static org.apache.kafka.clients.producer.ProducerConfig.LINGER_MS_CONFIG;
 
@@ -92,7 +93,6 @@ public final class TieredStorageTestContext implements AutoCloseable {
         initContext();
     }
 
-    @SuppressWarnings("deprecation")
     private void initClients() {
         // rediscover the new bootstrap-server port incase of broker restarts
         ListenerName listenerName = harness.listenerName();
@@ -107,7 +107,7 @@ public final class TieredStorageTestContext implements AutoCloseable {
 
         producer = harness.createProducer(ser, ser, producerOverrideProps);
         consumer = harness.createConsumer(de, de, commonOverrideProps,
-                JavaConverters.asScalaBuffer(Collections.<String>emptyList()).toList());
+                CollectionConverters.asScala(Collections.<String>emptyList()).toList());
         admin = harness.createAdminClient(listenerName, commonOverrideProps);
     }
 
@@ -298,6 +298,11 @@ public final class TieredStorageTestContext implements AutoCloseable {
                 .filter(rsm -> rsm.brokerId() == brokerId)
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("No remote storage manager found for broker " + brokerId));
+    }
+
+    // unused now, but it can be reused later as this is an utility method.
+    public Optional<LeaderEpochFileCache> leaderEpochFileCache(int brokerId, TopicPartition partition) {
+        return log(brokerId, partition).map(log -> log.leaderEpochCache());
     }
 
     public List<LocalTieredStorage> remoteStorageManagers() {

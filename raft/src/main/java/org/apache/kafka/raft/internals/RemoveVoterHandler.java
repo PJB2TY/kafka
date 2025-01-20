@@ -24,6 +24,8 @@ import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.raft.LeaderState;
 import org.apache.kafka.raft.LogOffsetMetadata;
 import org.apache.kafka.raft.RaftUtil;
+import org.apache.kafka.raft.ReplicaKey;
+import org.apache.kafka.raft.VoterSet;
 import org.apache.kafka.server.common.KRaftVersion;
 
 import org.slf4j.Logger;
@@ -89,7 +91,7 @@ public final class RemoveVoterHandler {
 
         // Check that the leader has established a HWM and committed the current epoch
         Optional<Long> highWatermark = leaderState.highWatermark().map(LogOffsetMetadata::offset);
-        if (!highWatermark.isPresent()) {
+        if (highWatermark.isEmpty()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.removeVoterResponse(
                     Errors.REQUEST_TIMED_OUT,
@@ -115,7 +117,7 @@ public final class RemoveVoterHandler {
 
         // Check that there are no uncommitted VotersRecord
         Optional<LogHistory.Entry<VoterSet>> votersEntry = partitionState.lastVoterSetEntry();
-        if (!votersEntry.isPresent() || votersEntry.get().offset() >= highWatermark.get()) {
+        if (votersEntry.isEmpty() || votersEntry.get().offset() >= highWatermark.get()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.removeVoterResponse(
                     Errors.REQUEST_TIMED_OUT,
@@ -130,7 +132,7 @@ public final class RemoveVoterHandler {
 
         // Remove the voter from the set of voters
         Optional<VoterSet> newVoters = votersEntry.get().value().removeVoter(voterKey);
-        if (!newVoters.isPresent()) {
+        if (newVoters.isEmpty()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.removeVoterResponse(
                     Errors.VOTER_NOT_FOUND,

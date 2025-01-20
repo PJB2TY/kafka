@@ -18,9 +18,6 @@ package org.apache.kafka.raft;
 
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.MockTime;
-import org.apache.kafka.common.utils.Utils;
-import org.apache.kafka.raft.internals.ReplicaKey;
-import org.apache.kafka.raft.internals.VoterSetTest;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -28,6 +25,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.InetSocketAddress;
 import java.util.Collections;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -66,11 +64,11 @@ class ResignedStateTest {
     @Test
     public void testResignedState() {
         int remoteId = 1;
-        Set<Integer> voters = Utils.mkSet(localId, remoteId);
+        Set<Integer> voters = Set.of(localId, remoteId);
 
         ResignedState state = newResignedState(voters);
 
-        assertEquals(ElectionState.withElectedLeader(epoch, localId, voters), state.election());
+        assertEquals(ElectionState.withElectedLeader(epoch, localId, Optional.empty(), voters), state.election());
         assertEquals(epoch, state.epoch());
 
         assertEquals(Collections.singleton(remoteId), state.unackedVoters());
@@ -90,20 +88,33 @@ class ResignedStateTest {
     @ParameterizedTest
     @ValueSource(booleans = {true, false})
     public void testGrantVote(boolean isLogUpToDate) {
-        ResignedState state = newResignedState(Utils.mkSet(1, 2, 3));
+        ResignedState state = newResignedState(Set.of(1, 2, 3));
 
-        assertFalse(state.canGrantVote(ReplicaKey.of(1, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate));
-        assertFalse(state.canGrantVote(ReplicaKey.of(2, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate));
-        assertFalse(state.canGrantVote(ReplicaKey.of(3, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate));
+        assertEquals(
+            isLogUpToDate,
+            state.canGrantVote(ReplicaKey.of(1, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate, true)
+        );
+        assertEquals(
+            isLogUpToDate,
+            state.canGrantVote(ReplicaKey.of(2, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate, true)
+        );
+        assertEquals(
+            isLogUpToDate,
+            state.canGrantVote(ReplicaKey.of(3, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate, true)
+        );
+
+        assertFalse(state.canGrantVote(ReplicaKey.of(1, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate, false));
+        assertFalse(state.canGrantVote(ReplicaKey.of(2, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate, false));
+        assertFalse(state.canGrantVote(ReplicaKey.of(3, ReplicaKey.NO_DIRECTORY_ID), isLogUpToDate, false));
     }
 
     @Test
     void testNegativeScenarioAcknowledgeResignation() {
-        Set<Integer> voters = Utils.mkSet(0, 1, 2, 3, 4, 5);
+        Set<Integer> voters = Set.of(0, 1, 2, 3, 4, 5);
 
         ResignedState state = newResignedState(voters);
 
-        assertEquals(ElectionState.withElectedLeader(epoch, 0, voters), state.election());
+        assertEquals(ElectionState.withElectedLeader(epoch, 0, Optional.empty(), voters), state.election());
         assertEquals(epoch, state.epoch());
 
         // try non-existed voter must throw an exception
@@ -112,7 +123,7 @@ class ResignedStateTest {
 
     @Test
     void testLeaderEndpoints() {
-        ResignedState state = newResignedState(Utils.mkSet(1, 2, 3));
+        ResignedState state = newResignedState(Set.of(1, 2, 3));
 
         assertEquals(localEndpoints, state.leaderEndpoints());
         assertNotEquals(Endpoints.empty(), state.leaderEndpoints());

@@ -59,6 +59,8 @@ import org.apache.kafka.image.MetadataDelta;
 import org.apache.kafka.image.MetadataImage;
 import org.apache.kafka.image.MetadataProvenance;
 import org.apache.kafka.metadata.LeaderRecoveryState;
+import org.apache.kafka.network.SocketServerConfigs;
+import org.apache.kafka.network.metrics.RequestChannelMetrics;
 import org.apache.kafka.raft.QuorumConfig;
 import org.apache.kafka.server.authorizer.Action;
 import org.apache.kafka.server.authorizer.AuthorizationResult;
@@ -90,7 +92,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class DescribeTopicPartitionsRequestHandlerTest {
-    private final RequestChannel.Metrics requestChannelMetrics = mock(RequestChannel.Metrics.class);
+    private final RequestChannelMetrics requestChannelMetrics = mock(RequestChannelMetrics.class);
     private final KafkaPrincipalSerde kafkaPrincipalSerde = new KafkaPrincipalSerde() {
         @Override
         public byte[] serialize(KafkaPrincipal principal) throws SerializationException {
@@ -494,7 +496,7 @@ class DescribeTopicPartitionsRequestHandlerTest {
     void updateKraftMetadataCache(KRaftMetadataCache kRaftMetadataCache, List<ApiMessage> records) {
         MetadataImage image = kRaftMetadataCache.currentImage();
         MetadataImage partialImage = new MetadataImage(
-            new MetadataProvenance(100L, 10, 1000L),
+            new MetadataProvenance(100L, 10, 1000L, true),
             image.features(),
             ClusterImage.EMPTY,
             image.topics(),
@@ -507,7 +509,7 @@ class DescribeTopicPartitionsRequestHandlerTest {
         );
         MetadataDelta delta = new MetadataDelta.Builder().setImage(partialImage).build();
         records.stream().forEach(record -> delta.replay(record));
-        kRaftMetadataCache.setImage(delta.apply(new MetadataProvenance(100L, 10, 1000L)));
+        kRaftMetadataCache.setImage(delta.apply(new MetadataProvenance(100L, 10, 1000L, true)));
     }
 
     private RequestChannel.Request buildRequest(AbstractRequest request,
@@ -533,7 +535,6 @@ class DescribeTopicPartitionsRequestHandlerTest {
         int brokerId = 1;
         Properties properties = TestUtils.createBrokerConfig(
             brokerId,
-            "",
             true,
             true,
             TestUtils.RandomPort(),
@@ -558,7 +559,8 @@ class DescribeTopicPartitionsRequestHandlerTest {
         int voterId = brokerId + 1;
         properties.put(QuorumConfig.QUORUM_VOTERS_CONFIG, voterId + "@localhost:9093");
         properties.put(KRaftConfigs.CONTROLLER_LISTENER_NAMES_CONFIG, "SSL");
-        TestUtils.setIbpAndMessageFormatVersions(properties, MetadataVersion.latestProduction());
+        properties.put(SocketServerConfigs.LISTENER_SECURITY_PROTOCOL_MAP_CONFIG, "PLAINTEXT:PLAINTEXT,SSL:SSL");
+        TestUtils.setIbpVersion(properties, MetadataVersion.latestProduction());
         return new KafkaConfig(properties);
     }
 }

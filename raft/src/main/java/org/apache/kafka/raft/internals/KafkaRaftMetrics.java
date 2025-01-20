@@ -28,6 +28,7 @@ import org.apache.kafka.common.metrics.stats.WindowedSum;
 import org.apache.kafka.raft.LogOffsetMetadata;
 import org.apache.kafka.raft.OffsetAndEpoch;
 import org.apache.kafka.raft.QuorumState;
+import org.apache.kafka.raft.ReplicaKey;
 
 import java.util.Arrays;
 import java.util.OptionalLong;
@@ -70,10 +71,14 @@ public class KafkaRaftMetrics implements AutoCloseable {
         Gauge<String> stateProvider = (mConfig, currentTimeMs) -> {
             if (state.isLeader()) {
                 return "leader";
+            } else if (state.isProspectiveNotVoted()) {
+                return "prospective";
+            } else if (state.isProspectiveAndVoted()) {
+                return "prospective-voted";
             } else if (state.isCandidate()) {
                 return "candidate";
             } else if (state.isUnattachedAndVoted()) {
-                return "voted";
+                return "unattached-voted";
             } else if (state.isFollower()) {
                 // a broker is special kind of follower, as not being a voter, it's an observer
                 if (state.isObserver()) {
@@ -95,9 +100,7 @@ public class KafkaRaftMetrics implements AutoCloseable {
             if (state.isLeader() || state.isCandidate()) {
                 return state.localIdOrThrow();
             } else {
-                return (double) state.maybeUnattachedState()
-                    .flatMap(votedState -> votedState.votedKey().map(ReplicaKey::id))
-                    .orElse(-1);
+                return state.votedKey().map(ReplicaKey::id).orElse(-1);
             }
         });
 
@@ -110,10 +113,7 @@ public class KafkaRaftMetrics implements AutoCloseable {
             if (state.isLeader() || state.isCandidate()) {
                 return state.localDirectoryId().toString();
             } else {
-                return state.maybeUnattachedState()
-                    .flatMap(votedState -> votedState.votedKey().flatMap(ReplicaKey::directoryId))
-                    .orElse(Uuid.ZERO_UUID)
-                    .toString();
+                return state.votedKey().flatMap(ReplicaKey::directoryId).orElse(Uuid.ZERO_UUID).toString();
             }
         };
         metrics.addMetric(this.currentVotedDirectoryIdMetricName, null, votedDirectoryIdProvider);

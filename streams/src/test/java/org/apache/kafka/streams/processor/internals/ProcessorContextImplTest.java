@@ -24,12 +24,13 @@ import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.StreamsConfig.InternalConfig;
 import org.apache.kafka.streams.kstream.Windowed;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.StateStore;
-import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.Processor;
+import org.apache.kafka.streams.processor.api.ProcessorContext;
+import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.Task.TaskType;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.query.Position;
@@ -118,6 +119,7 @@ public class ProcessorContextImplTest {
     private KeyValueIterator<String, Long> allIter;
     @Mock
     private KeyValueIterator<String, ValueAndTimestamp<Long>> timestampedAllIter;
+    @SuppressWarnings("rawtypes")
     @Mock
     private WindowStoreIterator windowStoreIter;
 
@@ -142,10 +144,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final KeyValueStore<String, Long> keyValueStoreMock = mock(KeyValueStore.class);
-        when(stateManager.getGlobalStore("GlobalKeyValueStore")).thenAnswer(answer -> keyValueStoreMock(keyValueStoreMock));
+        when(stateManager.globalStore("GlobalKeyValueStore")).thenAnswer(answer -> keyValueStoreMock(keyValueStoreMock));
 
         context = buildProcessorContextImpl(streamsConfig, stateManager);
 
@@ -174,10 +176,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final TimestampedKeyValueStore<String, Long> timestampedKeyValueStoreMock = mock(TimestampedKeyValueStore.class);
-        when(stateManager.getGlobalStore("GlobalTimestampedKeyValueStore")).thenAnswer(answer -> timestampedKeyValueStoreMock(timestampedKeyValueStoreMock));
+        when(stateManager.globalStore("GlobalTimestampedKeyValueStore")).thenAnswer(answer -> timestampedKeyValueStoreMock(timestampedKeyValueStoreMock));
 
         context = buildProcessorContextImpl(streamsConfig, stateManager);
 
@@ -207,10 +209,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final WindowStore<String, Long> windowStore = mock(WindowStore.class);
-        when(stateManager.getGlobalStore("GlobalWindowStore")).thenAnswer(answer -> windowStoreMock(windowStore));
+        when(stateManager.globalStore("GlobalWindowStore")).thenAnswer(answer -> windowStoreMock(windowStore));
 
         context = buildProcessorContextImpl(streamsConfig, stateManager);
 
@@ -238,10 +240,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final TimestampedWindowStore<String, Long> windowStore = mock(TimestampedWindowStore.class);
-        when(stateManager.getGlobalStore("GlobalTimestampedWindowStore")).thenAnswer(answer -> timestampedWindowStoreMock(windowStore));
+        when(stateManager.globalStore("GlobalTimestampedWindowStore")).thenAnswer(answer -> timestampedWindowStoreMock(windowStore));
 
         context = buildProcessorContextImpl(streamsConfig, stateManager);
 
@@ -269,10 +271,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final SessionStore<String, Long> sessionStore = mock(SessionStore.class);
-        when(stateManager.getGlobalStore("GlobalSessionStore")).thenAnswer(answer -> sessionStoreMock(sessionStore));
+        when(stateManager.globalStore("GlobalSessionStore")).thenAnswer(answer -> sessionStoreMock(sessionStore));
 
         context = buildProcessorContextImpl(streamsConfig, stateManager);
 
@@ -300,10 +302,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final KeyValueStore<String, Long> keyValueStoreMock = mock(KeyValueStore.class);
-        when(stateManager.getStore("LocalKeyValueStore")).thenAnswer(answer -> keyValueStoreMock(keyValueStoreMock));
+        when(stateManager.store("LocalKeyValueStore")).thenAnswer(answer -> keyValueStoreMock(keyValueStoreMock));
         mockStateStoreFlush(keyValueStoreMock);
         mockKeyValueStoreOperation(keyValueStoreMock);
 
@@ -344,10 +346,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final TimestampedKeyValueStore<String, Long> timestampedKeyValueStoreMock = mock(TimestampedKeyValueStore.class);
-        when(stateManager.getStore("LocalTimestampedKeyValueStore"))
+        when(stateManager.store("LocalTimestampedKeyValueStore"))
             .thenAnswer(answer -> timestampedKeyValueStoreMock(timestampedKeyValueStoreMock));
         mockTimestampedKeyValueOperation(timestampedKeyValueStoreMock);
         mockStateStoreFlush(timestampedKeyValueStoreMock);
@@ -389,10 +391,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final WindowStore<String, Long> windowStore = mock(WindowStore.class);
-        when(stateManager.getStore("LocalWindowStore")).thenAnswer(answer -> windowStoreMock(windowStore));
+        when(stateManager.store("LocalWindowStore")).thenAnswer(answer -> windowStoreMock(windowStore));
         mockStateStoreFlush(windowStore);
 
         doAnswer(answer -> {
@@ -429,10 +431,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final TimestampedWindowStore<String, Long> windowStore = mock(TimestampedWindowStore.class);
-        when(stateManager.getStore("LocalTimestampedWindowStore")).thenAnswer(answer -> timestampedWindowStoreMock(windowStore));
+        when(stateManager.store("LocalTimestampedWindowStore")).thenAnswer(answer -> timestampedWindowStoreMock(windowStore));
         mockStateStoreFlush(windowStore);
 
         doAnswer(answer -> {
@@ -475,10 +477,10 @@ public class ProcessorContextImplTest {
         foreachSetUp();
 
         when(stateManager.taskType()).thenReturn(TaskType.ACTIVE);
-        when(stateManager.getGlobalStore(anyString())).thenReturn(null);
+        when(stateManager.globalStore(anyString())).thenReturn(null);
 
         final SessionStore<String, Long> sessionStore = mock(SessionStore.class);
-        when(stateManager.getStore("LocalSessionStore")).thenAnswer(answer -> sessionStoreMock(sessionStore));
+        when(stateManager.store("LocalSessionStore")).thenAnswer(answer -> sessionStoreMock(sessionStore));
         mockStateStoreFlush(sessionStore);
 
         doAnswer(answer -> {
@@ -897,7 +899,7 @@ public class ProcessorContextImplTest {
 
         final ProcessorMetadata emptyMetadata = new ProcessorMetadata();
         context.setProcessorMetadata(emptyMetadata);
-        assertEquals(emptyMetadata, context.getProcessorMetadata());
+        assertEquals(emptyMetadata, context.processorMetadata());
 
         final ProcessorMetadata metadata = new ProcessorMetadata(
             mkMap(
@@ -941,7 +943,6 @@ public class ProcessorContextImplTest {
         );
     }
 
-    @SuppressWarnings("unchecked")
     private KeyValueStore<String, Long> keyValueStoreMock(final KeyValueStore<String, Long> keyValueStoreMock) {
         initStateStoreMock(keyValueStoreMock);
 
@@ -976,7 +977,6 @@ public class ProcessorContextImplTest {
         }).when(keyValueStoreMock).delete(anyString());
     }
 
-    @SuppressWarnings("unchecked")
     private TimestampedKeyValueStore<String, Long> timestampedKeyValueStoreMock(final TimestampedKeyValueStore<String, Long> timestampedKeyValueStoreMock) {
         initStateStoreMock(timestampedKeyValueStoreMock);
 
@@ -1011,7 +1011,6 @@ public class ProcessorContextImplTest {
         }).when(timestampedKeyValueStoreMock).delete(anyString());
     }
 
-    @SuppressWarnings("unchecked")
     private WindowStore<String, Long> windowStoreMock(final WindowStore<String, Long> windowStore) {
         initStateStoreMock(windowStore);
 
@@ -1024,7 +1023,6 @@ public class ProcessorContextImplTest {
         return windowStore;
     }
 
-    @SuppressWarnings("unchecked")
     private TimestampedWindowStore<String, Long> timestampedWindowStoreMock(final TimestampedWindowStore<String, Long> windowStore) {
         initStateStoreMock(windowStore);
 
@@ -1037,7 +1035,6 @@ public class ProcessorContextImplTest {
         return windowStore;
     }
 
-    @SuppressWarnings("unchecked")
     private SessionStore<String, Long> sessionStoreMock(final SessionStore<String, Long> sessionStore) {
         initStateStoreMock(sessionStore);
 
@@ -1081,16 +1078,17 @@ public class ProcessorContextImplTest {
         }).when(stateStore).flush();
     }
 
+    @SuppressWarnings("rawtypes")
     private <T extends StateStore> void doTest(final String name, final Consumer<T> checker) {
-        @SuppressWarnings("deprecation") final org.apache.kafka.streams.processor.Processor<String, Long> processor = new org.apache.kafka.streams.processor.Processor<String, Long>() {
+        final Processor<String, Long, String, Long> processor = new Processor<>() {
             @Override
-            public void init(final ProcessorContext context) {
+            public void init(final ProcessorContext<String, Long> context) {
                 final T store = context.getStateStore(name);
                 checker.accept(store);
             }
 
             @Override
-            public void process(final String k, final Long v) {
+            public void process(final Record<String, Long> record) {
                 //No-op.
             }
 
@@ -1100,7 +1098,7 @@ public class ProcessorContextImplTest {
             }
         };
 
-        processor.init(context);
+        processor.init((ProcessorContext) context);
     }
 
     private void verifyStoreCannotBeInitializedOrClosed(final StateStore store) {
@@ -1108,7 +1106,7 @@ public class ProcessorContextImplTest {
         assertTrue(store.persistent());
         assertTrue(store.isOpen());
 
-        checkThrowsUnsupportedOperation(() -> store.init((StateStoreContext) null, null), "init()");
+        checkThrowsUnsupportedOperation(() -> store.init(null, null), "init()");
         checkThrowsUnsupportedOperation(store::close, "close()");
     }
 

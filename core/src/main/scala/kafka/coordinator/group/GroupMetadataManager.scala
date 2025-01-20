@@ -17,23 +17,20 @@
 
 package kafka.coordinator.group
 
-import java.io.PrintStream
 import java.nio.ByteBuffer
-import java.nio.charset.StandardCharsets
-import java.util.{Optional, OptionalInt}
+import java.util.{Optional, OptionalInt, OptionalLong}
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.locks.ReentrantLock
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.{CompletableFuture, ConcurrentHashMap}
 import java.util.function.Supplier
 import com.yammer.metrics.core.Gauge
-import kafka.common.OffsetAndMetadata
+import kafka.cluster.Partition
 import kafka.coordinator.group.GroupMetadataManager.maybeConvertOffsetCommitError
-import kafka.server.{ReplicaManager, RequestLocal}
+import kafka.server.ReplicaManager
 import kafka.utils.CoreUtils.inLock
-import kafka.utils.Implicits._
 import kafka.utils._
-import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.apache.kafka.common.compress.Compression
+import org.apache.kafka.common.errors.UnsupportedVersionException
 import org.apache.kafka.common.internals.Topic
 import org.apache.kafka.common.metrics.{Metrics, Sensor}
 import org.apache.kafka.common.metrics.stats.{Avg, Max, Meter}
@@ -43,21 +40,20 @@ import org.apache.kafka.common.requests.OffsetFetchResponse.PartitionData
 import org.apache.kafka.common.requests.ProduceResponse.PartitionResponse
 import org.apache.kafka.common.requests.{OffsetCommitRequest, OffsetFetchResponse}
 import org.apache.kafka.common.utils.{Time, Utils}
-import org.apache.kafka.common.{MessageFormatter, TopicIdPartition, TopicPartition}
-import org.apache.kafka.coordinator.group.OffsetConfig
-import org.apache.kafka.coordinator.group.generated.{GroupMetadataValue, OffsetCommitKey, OffsetCommitValue, GroupMetadataKey => GroupMetadataKeyData}
-import org.apache.kafka.server.common.MetadataVersion
-import org.apache.kafka.server.common.MetadataVersion.{IBP_0_10_1_IV0, IBP_2_1_IV0, IBP_2_1_IV1, IBP_2_3_IV0}
+import org.apache.kafka.common.{TopicIdPartition, TopicPartition}
+import org.apache.kafka.coordinator.group.{OffsetAndMetadata, OffsetConfig}
+import org.apache.kafka.coordinator.group.generated.{CoordinatorRecordType, GroupMetadataValue, LegacyOffsetCommitKey, OffsetCommitKey, OffsetCommitValue, GroupMetadataKey => GroupMetadataKeyData}
+import org.apache.kafka.server.common.RequestLocal
 import org.apache.kafka.server.metrics.KafkaMetricsGroup
+import org.apache.kafka.server.storage.log.FetchIsolation
 import org.apache.kafka.server.util.KafkaScheduler
-import org.apache.kafka.storage.internals.log.{AppendOrigin, FetchIsolation, VerificationGuard}
+import org.apache.kafka.storage.internals.log.{AppendOrigin, VerificationGuard}
 
 import scala.collection._
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
 class GroupMetadataManager(brokerId: Int,
-                           interBrokerProtocolVersion: MetadataVersion,
                            config: OffsetConfig,
                            val replicaManager: ReplicaManager,
                            time: Time,
@@ -242,80 +238,79 @@ class GroupMetadataManager(brokerId: Int,
   def storeGroup(group: GroupMetadata,
                  groupAssignment: Map[String, Array[Byte]],
                  responseCallback: Errors => Unit,
-                 requestLocal: RequestLocal = RequestLocal.NoCaching): Unit = {
-    getMagic(partitionFor(group.groupId)) match {
-      case Some(magicValue) =>
-        // We always use CREATE_TIME, like the producer. The conversion to LOG_APPEND_TIME (if necessary) happens automatically.
-        val timestampType = TimestampType.CREATE_TIME
-        val timestamp = time.milliseconds()
-        val key = GroupMetadataManager.groupMetadataKey(group.groupId)
-        val value = GroupMetadataManager.groupMetadataValue(group, groupAssignment, interBrokerProtocolVersion)
+                 requestLocal: RequestLocal = RequestLocal.noCaching): Unit = {
+    if (onlinePartition(partitionFor(group.groupId)).isDefined) {
+      // We always use CREATE_TIME, like the producer. The conversion to LOG_APPEND_TIME (if necessary) happens automatically.
+      val timestampType = TimestampType.CREATE_TIME
+      val timestamp = time.milliseconds()
+      val key = GroupMetadataManager.groupMetadataKey(group.groupId)
+      val value = GroupMetadataManager.groupMetadataValue(group, groupAssignment)
 
-        val records = {
-          val buffer = ByteBuffer.allocate(AbstractRecords.estimateSizeInBytes(magicValue, compression.`type`(),
-            Seq(new SimpleRecord(timestamp, key, value)).asJava))
-          val builder = MemoryRecords.builder(buffer, magicValue, compression, timestampType, 0L)
-          builder.append(timestamp, key, value)
-          builder.build()
-        }
+      val records = {
+        val buffer = ByteBuffer.allocate(AbstractRecords.estimateSizeInBytes(RecordBatch.CURRENT_MAGIC_VALUE, compression.`type`(),
+          Seq(new SimpleRecord(timestamp, key, value)).asJava))
+        val builder = MemoryRecords.builder(buffer, RecordBatch.CURRENT_MAGIC_VALUE, compression, timestampType, 0L)
+        builder.append(timestamp, key, value)
+        builder.build()
+      }
 
-        val groupMetadataPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partitionFor(group.groupId))
-        val groupMetadataRecords = Map(groupMetadataPartition -> records)
-        val generationId = group.generationId
+      val groupMetadataPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partitionFor(group.groupId))
+      val groupMetadataRecords = Map(groupMetadataPartition -> records)
+      val generationId = group.generationId
 
-        // set the callback function to insert the created group into cache after log append completed
-        def putCacheCallback(responseStatus: Map[TopicPartition, PartitionResponse]): Unit = {
-          // the append response should only contain the topics partition
-          if (responseStatus.size != 1 || !responseStatus.contains(groupMetadataPartition))
-            throw new IllegalStateException("Append status %s should only have one partition %s"
-              .format(responseStatus, groupMetadataPartition))
+      // set the callback function to insert the created group into cache after log append completed
+      def putCacheCallback(responseStatus: Map[TopicPartition, PartitionResponse]): Unit = {
+        // the append response should only contain the topics partition
+        if (responseStatus.size != 1 || !responseStatus.contains(groupMetadataPartition))
+          throw new IllegalStateException("Append status %s should only have one partition %s"
+            .format(responseStatus, groupMetadataPartition))
 
-          // construct the error status in the propagated assignment response in the cache
-          val status = responseStatus(groupMetadataPartition)
+        // construct the error status in the propagated assignment response in the cache
+        val status = responseStatus(groupMetadataPartition)
 
-          val responseError = if (status.error == Errors.NONE) {
-            Errors.NONE
-          } else {
-            debug(s"Metadata from group ${group.groupId} with generation $generationId failed when appending to log " +
-              s"due to ${status.error.exceptionName}")
+        val responseError = if (status.error == Errors.NONE) {
+          Errors.NONE
+        } else {
+          debug(s"Metadata from group ${group.groupId} with generation $generationId failed when appending to log " +
+            s"due to ${status.error.exceptionName}")
 
-            // transform the log append error code to the corresponding the commit status error code
-            status.error match {
-              case Errors.UNKNOWN_TOPIC_OR_PARTITION
-                   | Errors.NOT_ENOUGH_REPLICAS
-                   | Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND =>
-                Errors.COORDINATOR_NOT_AVAILABLE
+          // transform the log append error code to the corresponding the commit status error code
+          status.error match {
+            case Errors.UNKNOWN_TOPIC_OR_PARTITION
+                 | Errors.NOT_ENOUGH_REPLICAS
+                 | Errors.NOT_ENOUGH_REPLICAS_AFTER_APPEND =>
+              Errors.COORDINATOR_NOT_AVAILABLE
 
-              case Errors.NOT_LEADER_OR_FOLLOWER
-                   | Errors.KAFKA_STORAGE_ERROR =>
-                Errors.NOT_COORDINATOR
+            case Errors.NOT_LEADER_OR_FOLLOWER
+                 | Errors.KAFKA_STORAGE_ERROR =>
+              Errors.NOT_COORDINATOR
 
-              case Errors.REQUEST_TIMED_OUT =>
-                Errors.REBALANCE_IN_PROGRESS
+            case Errors.REQUEST_TIMED_OUT =>
+              Errors.REBALANCE_IN_PROGRESS
 
-              case Errors.MESSAGE_TOO_LARGE
-                   | Errors.RECORD_LIST_TOO_LARGE
-                   | Errors.INVALID_FETCH_SIZE =>
+            case Errors.MESSAGE_TOO_LARGE
+                 | Errors.RECORD_LIST_TOO_LARGE
+                 | Errors.INVALID_FETCH_SIZE =>
 
-                error(s"Appending metadata message for group ${group.groupId} generation $generationId failed due to " +
-                  s"${status.error.exceptionName}, returning UNKNOWN error code to the client")
+              error(s"Appending metadata message for group ${group.groupId} generation $generationId failed due to " +
+                s"${status.error.exceptionName}, returning UNKNOWN error code to the client")
 
-                Errors.UNKNOWN_SERVER_ERROR
+              Errors.UNKNOWN_SERVER_ERROR
 
-              case other =>
-                error(s"Appending metadata message for group ${group.groupId} generation $generationId failed " +
-                  s"due to unexpected error: ${status.error.exceptionName}")
+            case other =>
+              error(s"Appending metadata message for group ${group.groupId} generation $generationId failed " +
+                s"due to unexpected error: ${status.error.exceptionName}")
 
-                other
-            }
+              other
           }
-
-          responseCallback(responseError)
         }
-        appendForGroup(group, groupMetadataRecords, requestLocal, putCacheCallback)
 
-      case None =>
-        responseCallback(Errors.NOT_COORDINATOR)
+        responseCallback(responseError)
+      }
+
+      appendForGroup(group, groupMetadataRecords, requestLocal, putCacheCallback)
+    } else {
+      responseCallback(Errors.NOT_COORDINATOR)
     }
   }
 
@@ -330,7 +325,7 @@ class GroupMetadataManager(brokerId: Int,
     // call replica manager to append the group message
     replicaManager.appendRecords(
       timeout = config.offsetCommitTimeoutMs.toLong,
-      requiredAcks = config.offsetCommitRequiredAcks,
+      requiredAcks = -1,
       internalTopicsAllowed = true,
       origin = AppendOrigin.COORDINATOR,
       entriesPerPartition = records,
@@ -354,7 +349,7 @@ class GroupMetadataManager(brokerId: Int,
 
       val records = filteredOffsetMetadata.map { case (topicIdPartition, offsetAndMetadata) =>
         val key = GroupMetadataManager.offsetCommitKey(groupId, topicIdPartition.topicPartition)
-        val value = GroupMetadataManager.offsetCommitValue(offsetAndMetadata, interBrokerProtocolVersion)
+        val value = GroupMetadataManager.offsetCommitValue(offsetAndMetadata)
         new SimpleRecord(timestamp, key, value)
       }
       val buffer = ByteBuffer.allocate(AbstractRecords.estimateSizeInBytes(magicValue, compression.`type`(), records.asJava))
@@ -392,7 +387,7 @@ class GroupMetadataManager(brokerId: Int,
       val responseError = group.inLock {
         if (status.error == Errors.NONE) {
           if (!group.is(Dead)) {
-            filteredOffsetMetadata.forKeyValue { (topicIdPartition, offsetAndMetadata) =>
+            filteredOffsetMetadata.foreachEntry { (topicIdPartition, offsetAndMetadata) =>
               if (isTxnOffsetCommit)
                 group.onTxnOffsetCommitAppend(producerId, topicIdPartition, CommitRecordMetadataAndOffset(Some(status.baseOffset), offsetAndMetadata))
               else
@@ -408,7 +403,7 @@ class GroupMetadataManager(brokerId: Int,
           if (!group.is(Dead)) {
             if (!group.hasPendingOffsetCommitsFromProducer(producerId))
               removeProducerGroup(producerId, group.groupId)
-            filteredOffsetMetadata.forKeyValue { (topicIdPartition, offsetAndMetadata) =>
+            filteredOffsetMetadata.foreachEntry { (topicIdPartition, offsetAndMetadata) =>
               if (isTxnOffsetCommit)
                 group.failPendingTxnOffsetCommit(producerId, topicIdPartition)
               else
@@ -450,7 +445,7 @@ class GroupMetadataManager(brokerId: Int,
                    responseCallback: immutable.Map[TopicIdPartition, Errors] => Unit,
                    producerId: Long = RecordBatch.NO_PRODUCER_ID,
                    producerEpoch: Short = RecordBatch.NO_PRODUCER_EPOCH,
-                   requestLocal: RequestLocal = RequestLocal.NoCaching,
+                   requestLocal: RequestLocal = RequestLocal.noCaching,
                    verificationGuard: Option[VerificationGuard]): Unit = {
     if (!group.hasReceivedConsistentOffsetCommits)
       warn(s"group: ${group.groupId} with leader: ${group.leaderOrNull} has received offset commits from consumers as well " +
@@ -467,8 +462,7 @@ class GroupMetadataManager(brokerId: Int,
       return
     }
 
-    val magicOpt = getMagic(partitionFor(group.groupId))
-    if (magicOpt.isEmpty) {
+    if (onlinePartition(partitionFor(group.groupId)).isEmpty) {
       val commitStatus = offsetMetadata.map { case (topicIdPartition, _) =>
         (topicIdPartition, Errors.NOT_COORDINATOR)
       }
@@ -477,7 +471,7 @@ class GroupMetadataManager(brokerId: Int,
     }
 
     val isTxnOffsetCommit = producerId != RecordBatch.NO_PRODUCER_ID
-    val records = generateOffsetRecords(magicOpt.get, isTxnOffsetCommit, group.groupId, offsetTopicPartition, filteredOffsetMetadata, producerId, producerEpoch)
+    val records = generateOffsetRecords(RecordBatch.CURRENT_MAGIC_VALUE, isTxnOffsetCommit, group.groupId, offsetTopicPartition, filteredOffsetMetadata, producerId, producerEpoch)
     val putCacheCallback = createPutCacheCallback(isTxnOffsetCommit, group, consumerId, offsetMetadata, filteredOffsetMetadata, responseCallback, producerId, records)
 
     val verificationGuards = verificationGuard.map(guard => offsetTopicPartition -> guard).toMap
@@ -526,8 +520,12 @@ class GroupMetadataManager(brokerId: Int,
                   new PartitionData(OffsetFetchResponse.INVALID_OFFSET,
                     Optional.empty(), "", Errors.NONE)
                 case Some(offsetAndMetadata) =>
-                  new PartitionData(offsetAndMetadata.offset,
-                    offsetAndMetadata.leaderEpoch, offsetAndMetadata.metadata, Errors.NONE)
+                  val leaderEpoch: Optional[Integer] = if (offsetAndMetadata.leaderEpoch.isPresent) {
+                    Optional.of(offsetAndMetadata.leaderEpoch.getAsInt)
+                  } else {
+                    Optional.empty()
+                  }
+                  new PartitionData(offsetAndMetadata.committedOffset, leaderEpoch, offsetAndMetadata.metadata, Errors.NONE)
               }
               topicPartition -> partitionData
             }
@@ -704,11 +702,11 @@ class GroupMetadataManager(brokerId: Int,
           }.partition { case (group, _) => loadedGroups.contains(group) }
 
         val pendingOffsetsByGroup = mutable.Map[String, mutable.Map[Long, mutable.Map[TopicPartition, CommitRecordMetadataAndOffset]]]()
-        pendingOffsets.forKeyValue { (producerId, producerOffsets) =>
+        pendingOffsets.foreachEntry { (producerId, producerOffsets) =>
           producerOffsets.keySet.map(_.group).foreach(addProducerGroup(producerId, _))
           producerOffsets
             .groupBy(_._1.group)
-            .forKeyValue { (group, offsets) =>
+            .foreachEntry { (group, offsets) =>
               val groupPendingOffsets = pendingOffsetsByGroup.getOrElseUpdate(group, mutable.Map.empty[Long, mutable.Map[TopicPartition, CommitRecordMetadataAndOffset]])
               val groupProducerOffsets = groupPendingOffsets.getOrElseUpdate(producerId, mutable.Map.empty[TopicPartition, CommitRecordMetadataAndOffset])
               groupProducerOffsets ++= offsets.map { case (groupTopicPartition, offset) =>
@@ -838,7 +836,7 @@ class GroupMetadataManager(brokerId: Int,
   // visible for testing
   private[group] def cleanupGroupMetadata(): Unit = {
     val currentTimestamp = time.milliseconds()
-    val numOffsetsRemoved = cleanupGroupMetadata(groupMetadataCache.values, RequestLocal.NoCaching,
+    val numOffsetsRemoved = cleanupGroupMetadata(groupMetadataCache.values, RequestLocal.noCaching,
       _.removeExpiredOffsets(currentTimestamp, config.offsetsRetentionMs))
     offsetExpiredSensor.record(numOffsetsRemoved)
     if (numOffsetsRemoved > 0)
@@ -867,56 +865,55 @@ class GroupMetadataManager(brokerId: Int,
         (removedOffsets, group.is(Dead), group.generationId)
       }
 
-    val offsetsPartition = partitionFor(groupId)
-    val appendPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, offsetsPartition)
-    getMagic(offsetsPartition) match {
-      case Some(magicValue) =>
-        // We always use CREATE_TIME, like the producer. The conversion to LOG_APPEND_TIME (if necessary) happens automatically.
-        val timestampType = TimestampType.CREATE_TIME
-        val timestamp = time.milliseconds()
+      val offsetsPartition = partitionFor(groupId)
+      val appendPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, offsetsPartition)
+      onlinePartition(offsetsPartition) match {
+        case Some(partition) =>
+          // We always use CREATE_TIME, like the producer. The conversion to LOG_APPEND_TIME (if necessary) happens automatically.
+          val timestampType = TimestampType.CREATE_TIME
+          val timestamp = time.milliseconds()
 
-          replicaManager.onlinePartition(appendPartition).foreach { partition =>
-            val tombstones = ArrayBuffer.empty[SimpleRecord]
-            removedOffsets.forKeyValue { (topicPartition, offsetAndMetadata) =>
-              trace(s"Removing expired/deleted offset and metadata for $groupId, $topicPartition: $offsetAndMetadata")
-              val commitKey = GroupMetadataManager.offsetCommitKey(groupId, topicPartition)
-              tombstones += new SimpleRecord(timestamp, commitKey, null)
-            }
-            trace(s"Marked ${removedOffsets.size} offsets in $appendPartition for deletion.")
+          val tombstones = ArrayBuffer.empty[SimpleRecord]
+          removedOffsets.foreachEntry { (topicPartition, offsetAndMetadata) =>
+            trace(s"Removing expired/deleted offset and metadata for $groupId, $topicPartition: $offsetAndMetadata")
+            val commitKey = GroupMetadataManager.offsetCommitKey(groupId, topicPartition)
+            tombstones += new SimpleRecord(timestamp, commitKey, null)
+          }
+          trace(s"Marked ${removedOffsets.size} offsets in $appendPartition for deletion.")
 
-            // We avoid writing the tombstone when the generationId is 0, since this group is only using
-            // Kafka for offset storage.
-            if (groupIsDead && groupMetadataCache.remove(groupId, group) && generation > 0) {
-              // Append the tombstone messages to the partition. It is okay if the replicas don't receive these (say,
-              // if we crash or leaders move) since the new leaders will still expire the consumers with heartbeat and
-              // retry removing this group.
-              val groupMetadataKey = GroupMetadataManager.groupMetadataKey(group.groupId)
-              tombstones += new SimpleRecord(timestamp, groupMetadataKey, null)
-              trace(s"Group $groupId removed from the metadata cache and marked for deletion in $appendPartition.")
-            }
+          // We avoid writing the tombstone when the generationId is 0, since this group is only using
+          // Kafka for offset storage.
+          if (groupIsDead && groupMetadataCache.remove(groupId, group) && generation > 0) {
+            // Append the tombstone messages to the partition. It is okay if the replicas don't receive these (say,
+            // if we crash or leaders move) since the new leaders will still expire the consumers with heartbeat and
+            // retry removing this group.
+            val groupMetadataKey = GroupMetadataManager.groupMetadataKey(group.groupId)
+            tombstones += new SimpleRecord(timestamp, groupMetadataKey, null)
+            trace(s"Group $groupId removed from the metadata cache and marked for deletion in $appendPartition.")
+          }
 
-            if (tombstones.nonEmpty) {
-              try {
-                // do not need to require acks since even if the tombstone is lost,
-                // it will be appended again in the next purge cycle
-                val records = MemoryRecords.withRecords(magicValue, 0L, compression, timestampType, tombstones.toArray: _*)
-                partition.appendRecordsToLeader(records, origin = AppendOrigin.COORDINATOR, requiredAcks = 0,
-                  requestLocal = requestLocal)
+          if (tombstones.nonEmpty) {
+            try {
+              // do not need to require acks since even if the tombstone is lost,
+              // it will be appended again in the next purge cycle
+              val records = MemoryRecords.withRecords(RecordBatch.CURRENT_MAGIC_VALUE, 0L, compression, timestampType, tombstones.toArray: _*)
+              partition.appendRecordsToLeader(records, origin = AppendOrigin.COORDINATOR, requiredAcks = 0,
+                requestLocal = requestLocal)
 
-                offsetsRemoved += removedOffsets.size
-                trace(s"Successfully appended ${tombstones.size} tombstones to $appendPartition for expired/deleted " +
-                  s"offsets and/or metadata for group $groupId")
-              } catch {
-                case t: Throwable =>
-                  error(s"Failed to append ${tombstones.size} tombstones to $appendPartition for expired/deleted " +
-                    s"offsets and/or metadata for group $groupId.", t)
-                // ignore and continue
-              }
+              offsetsRemoved += removedOffsets.size
+              trace(s"Successfully appended ${tombstones.size} tombstones to $appendPartition for expired/deleted " +
+                s"offsets and/or metadata for group $groupId")
+            } catch {
+              case t: Throwable =>
+                error(s"Failed to append ${tombstones.size} tombstones to $appendPartition for expired/deleted " +
+                  s"offsets and/or metadata for group $groupId.", t)
+              // ignore and continue
             }
           }
 
-        case None =>
-          info(s"BrokerId $brokerId is no longer a coordinator for the group $groupId. Proceeding cleanup for other alive groups")
+
+          case None =>
+            info(s"BrokerId $brokerId is no longer a coordinator for the group $groupId. Proceeding cleanup for other alive groups")
       }
     }
 
@@ -931,9 +928,17 @@ class GroupMetadataManager(brokerId: Int,
    * more group metadata locks to handle transaction completion, this operation is scheduled on
    * the scheduler thread to avoid deadlocks.
    */
-  def scheduleHandleTxnCompletion(producerId: Long, completedPartitions: Set[Int], isCommit: Boolean): Unit = {
-    scheduler.scheduleOnce(s"handleTxnCompletion-$producerId", () =>
-      handleTxnCompletion(producerId, completedPartitions, isCommit))
+  def scheduleHandleTxnCompletion(producerId: Long, completedPartitions: Set[Int], isCommit: Boolean): CompletableFuture[Void] = {
+    val future = new CompletableFuture[Void]()
+    scheduler.scheduleOnce(s"handleTxnCompletion-$producerId", () => {
+      try {
+        handleTxnCompletion(producerId, completedPartitions, isCommit)
+        future.complete(null)
+      } catch {
+        case e: Throwable => future.completeExceptionally(e)
+      }
+    })
+    future
   }
 
   private[group] def handleTxnCompletion(producerId: Long, completedPartitions: Set[Int], isCommit: Boolean): Unit = {
@@ -970,7 +975,7 @@ class GroupMetadataManager(brokerId: Int,
   }
 
   private def removeGroupFromAllProducers(groupId: String): Unit = openGroupsForProducer synchronized {
-    openGroupsForProducer.forKeyValue { (_, groups) =>
+    openGroupsForProducer.foreachEntry { (_, groups) =>
       groups.remove(groupId)
     }
   }
@@ -993,14 +998,8 @@ class GroupMetadataManager(brokerId: Int,
     // TODO: clear the caches
   }
 
-  /**
-   * Check if the replica is local and return the message format version
-   *
-   * @param   partition  Partition of GroupMetadataTopic
-   * @return  Some(MessageFormatVersion) if replica is local, None otherwise
-   */
-  private def getMagic(partition: Int): Option[Byte] =
-    replicaManager.getMagic(new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partition))
+  private def onlinePartition(partition: Int): Option[Partition] =
+    replicaManager.onlinePartition(new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partition))
 
   /**
    * Add a partition to the owned partition set.
@@ -1061,7 +1060,7 @@ object GroupMetadataManager {
    * @return key for offset commit message
    */
   def offsetCommitKey(groupId: String, topicPartition: TopicPartition): Array[Byte] = {
-    MessageUtil.toVersionPrefixedBytes(OffsetCommitKey.HIGHEST_SUPPORTED_VERSION,
+    MessageUtil.toCoordinatorTypePrefixedBytes(CoordinatorRecordType.OFFSET_COMMIT.id(),
       new OffsetCommitKey()
         .setGroup(groupId)
         .setTopic(topicPartition.topic)
@@ -1075,7 +1074,7 @@ object GroupMetadataManager {
    * @return key bytes for group metadata message
    */
   def groupMetadataKey(groupId: String): Array[Byte] = {
-    MessageUtil.toVersionPrefixedBytes(GroupMetadataKeyData.HIGHEST_SUPPORTED_VERSION,
+    MessageUtil.toCoordinatorTypePrefixedBytes(CoordinatorRecordType.GROUP_METADATA.id(),
       new GroupMetadataKeyData()
         .setGroup(groupId))
   }
@@ -1084,24 +1083,22 @@ object GroupMetadataManager {
    * Generates the payload for offset commit message from given offset and metadata
    *
    * @param offsetAndMetadata consumer's current offset and metadata
-   * @param metadataVersion the api version
+   * @param maxVersion the highest version allowed, we may use a lower version for compatibility reasons
+   *                   we serialize with the highest supported non-flexible version until a tagged field is introduced
+   *                   or the version is bumped.
    * @return payload for offset commit message
    */
-  def offsetCommitValue(offsetAndMetadata: OffsetAndMetadata,
-                        metadataVersion: MetadataVersion): Array[Byte] = {
+  def offsetCommitValue(offsetAndMetadata: OffsetAndMetadata, maxVersion: Short = 3): Array[Byte] = {
     val version =
-      if (metadataVersion.isLessThan(IBP_2_1_IV0) || offsetAndMetadata.expireTimestamp.nonEmpty) 1.toShort
-      else if (metadataVersion.isLessThan(IBP_2_1_IV1)) 2.toShort
-      // Serialize with the highest supported non-flexible version
-      // until a tagged field is introduced or the version is bumped.
-      else 3.toShort
+      if (offsetAndMetadata.expireTimestampMs.isPresent) Math.min(1, maxVersion).toShort
+      else maxVersion
     MessageUtil.toVersionPrefixedBytes(version, new OffsetCommitValue()
-      .setOffset(offsetAndMetadata.offset)
+      .setOffset(offsetAndMetadata.committedOffset)
       .setMetadata(offsetAndMetadata.metadata)
-      .setCommitTimestamp(offsetAndMetadata.commitTimestamp)
+      .setCommitTimestamp(offsetAndMetadata.commitTimestampMs)
       .setLeaderEpoch(offsetAndMetadata.leaderEpoch.orElse(RecordBatch.NO_PARTITION_LEADER_EPOCH))
       // version 1 has a non empty expireTimestamp field
-      .setExpireTimestamp(offsetAndMetadata.expireTimestamp.getOrElse(OffsetCommitRequest.DEFAULT_TIMESTAMP))
+      .setExpireTimestamp(offsetAndMetadata.expireTimestampMs.orElse(OffsetCommitRequest.DEFAULT_TIMESTAMP))
     )
   }
 
@@ -1111,21 +1108,14 @@ object GroupMetadataManager {
    *
    * @param groupMetadata current group metadata
    * @param assignment the assignment for the rebalancing generation
-   * @param metadataVersion the api version
+   * @param version the version to serialize it with, the default is `3`, the highest supported non-flexible version
+   *                until a tagged field is introduced or the version is bumped. The default should always be used
+   *                outside of tests
    * @return payload for offset commit message
    */
   def groupMetadataValue(groupMetadata: GroupMetadata,
                          assignment: Map[String, Array[Byte]],
-                         metadataVersion: MetadataVersion): Array[Byte] = {
-
-    val version =
-      if (metadataVersion.isLessThan(IBP_0_10_1_IV0)) 0.toShort
-      else if (metadataVersion.isLessThan(IBP_2_1_IV0)) 1.toShort
-      else if (metadataVersion.isLessThan(IBP_2_3_IV0)) 2.toShort
-      // Serialize with the highest supported non-flexible version
-      // until a tagged field is introduced or the version is bumped.
-      else 3.toShort
-
+                         version: Short = 3): Array[Byte] = {
     MessageUtil.toVersionPrefixedBytes(version, new GroupMetadataValue()
       .setProtocolType(groupMetadata.protocolType.getOrElse(""))
       .setGeneration(groupMetadata.generationId)
@@ -1156,16 +1146,28 @@ object GroupMetadataManager {
    */
   def readMessageKey(buffer: ByteBuffer): BaseKey = {
     val version = buffer.getShort
-    if (version >= OffsetCommitKey.LOWEST_SUPPORTED_VERSION && version <= OffsetCommitKey.HIGHEST_SUPPORTED_VERSION) {
-      // version 0 and 1 refer to offset
-      val key = new OffsetCommitKey(new ByteBufferAccessor(buffer), version)
-      OffsetKey(version, GroupTopicPartition(key.group, new TopicPartition(key.topic, key.partition)))
-    } else if (version >= GroupMetadataKeyData.LOWEST_SUPPORTED_VERSION && version <= GroupMetadataKeyData.HIGHEST_SUPPORTED_VERSION) {
-      // version 2 refers to group metadata
-      val key = new GroupMetadataKeyData(new ByteBufferAccessor(buffer), version)
-      GroupMetadataKey(version, key.group)
-    } else {
-      UnknownKey(version)
+    try {
+      CoordinatorRecordType.fromId(version) match {
+        case CoordinatorRecordType.LEGACY_OFFSET_COMMIT =>
+          // version 0 refers to the legacy offset commit.
+          val key = new LegacyOffsetCommitKey(new ByteBufferAccessor(buffer), 0.toShort)
+          OffsetKey(version, GroupTopicPartition(key.group, new TopicPartition(key.topic, key.partition)))
+
+        case CoordinatorRecordType.OFFSET_COMMIT =>
+          // version 1 refers to offset commit.
+          val key = new OffsetCommitKey(new ByteBufferAccessor(buffer), 0.toShort)
+          OffsetKey(version, GroupTopicPartition(key.group, new TopicPartition(key.topic, key.partition)))
+
+        case CoordinatorRecordType.GROUP_METADATA =>
+          // version 2 refers to group metadata.
+          val key = new GroupMetadataKeyData(new ByteBufferAccessor(buffer), 0.toShort)
+          GroupMetadataKey(version, key.group)
+
+        case _ =>
+          UnknownKey(version)
+      }
+    } catch {
+      case _: UnsupportedVersionException => UnknownKey(version)
     }
   }
 
@@ -1182,12 +1184,12 @@ object GroupMetadataManager {
       val version = buffer.getShort
       if (version >= OffsetCommitValue.LOWEST_SUPPORTED_VERSION && version <= OffsetCommitValue.HIGHEST_SUPPORTED_VERSION) {
         val value = new OffsetCommitValue(new ByteBufferAccessor(buffer), version)
-        OffsetAndMetadata(
-          offset = value.offset,
-          leaderEpoch = if (value.leaderEpoch == RecordBatch.NO_PARTITION_LEADER_EPOCH) Optional.empty() else Optional.of(value.leaderEpoch),
-          metadata = value.metadata,
-          commitTimestamp = value.commitTimestamp,
-          expireTimestamp = if (value.expireTimestamp == OffsetCommitRequest.DEFAULT_TIMESTAMP) None else Some(value.expireTimestamp))
+        new OffsetAndMetadata(
+          value.offset,
+          if (value.leaderEpoch == RecordBatch.NO_PARTITION_LEADER_EPOCH) OptionalInt.empty() else OptionalInt.of(value.leaderEpoch),
+          value.metadata,
+          value.commitTimestamp,
+          if (value.expireTimestamp == OffsetCommitRequest.DEFAULT_TIMESTAMP) OptionalLong.empty() else OptionalLong.of(value.expireTimestamp))
       } else throw new IllegalStateException(s"Unknown offset message version: $version")
     }
   }
@@ -1230,51 +1232,6 @@ object GroupMetadataManager {
           members = members,
           time = time)
       } else throw new IllegalStateException(s"Unknown group metadata message version: $version")
-    }
-  }
-
-  // Formatter for use with tools such as console consumer: Consumer should also set exclude.internal.topics to false.
-  // (specify --formatter "kafka.coordinator.group.GroupMetadataManager\$OffsetsMessageFormatter" when consuming __consumer_offsets)
-  @Deprecated
-  class OffsetsMessageFormatter extends MessageFormatter {
-    def writeTo(consumerRecord: ConsumerRecord[Array[Byte], Array[Byte]], output: PrintStream): Unit = {
-      Option(consumerRecord.key).map(key => GroupMetadataManager.readMessageKey(ByteBuffer.wrap(key))).foreach {
-        // Only print if the message is an offset record.
-        // We ignore the timestamp of the message because GroupMetadataMessage has its own timestamp.
-        case offsetKey: OffsetKey =>
-          val groupTopicPartition = offsetKey.key
-          val value = consumerRecord.value
-          val formattedValue =
-            if (value == null) "NULL"
-            else GroupMetadataManager.readOffsetMessageValue(ByteBuffer.wrap(value)).toString
-          output.write(groupTopicPartition.toString.getBytes(StandardCharsets.UTF_8))
-          output.write("::".getBytes(StandardCharsets.UTF_8))
-          output.write(formattedValue.getBytes(StandardCharsets.UTF_8))
-          output.write("\n".getBytes(StandardCharsets.UTF_8))
-        case _ => // no-op
-      }
-    }
-  }
-
-  // Formatter for use with tools to read group metadata history
-  @Deprecated
-  class GroupMetadataMessageFormatter extends MessageFormatter {
-    def writeTo(consumerRecord: ConsumerRecord[Array[Byte], Array[Byte]], output: PrintStream): Unit = {
-      Option(consumerRecord.key).map(key => GroupMetadataManager.readMessageKey(ByteBuffer.wrap(key))).foreach {
-        // Only print if the message is a group metadata record.
-        // We ignore the timestamp of the message because GroupMetadataMessage has its own timestamp.
-        case groupMetadataKey: GroupMetadataKey =>
-          val groupId = groupMetadataKey.key
-          val value = consumerRecord.value
-          val formattedValue =
-            if (value == null) "NULL"
-            else GroupMetadataManager.readGroupMessageValue(groupId, ByteBuffer.wrap(value), Time.SYSTEM).toString
-          output.write(groupId.getBytes(StandardCharsets.UTF_8))
-          output.write("::".getBytes(StandardCharsets.UTF_8))
-          output.write(formattedValue.getBytes(StandardCharsets.UTF_8))
-          output.write("\n".getBytes(StandardCharsets.UTF_8))
-        case _ => // no-op
-      }
     }
   }
 

@@ -23,6 +23,7 @@ import org.apache.kafka.common.{TopicPartition, Uuid}
 import org.apache.kafka.common.requests.FetchResponse
 import org.apache.kafka.server.common.{DirectoryEventHandler, OffsetAndEpoch, TopicIdPartition}
 import org.apache.kafka.storage.internals.log.{LogAppendInfo, LogStartOffsetIncrementReason}
+import org.apache.kafka.storage.log.metrics.BrokerTopicStats
 
 import java.util.concurrent.ConcurrentHashMap
 import scala.collection.{Map, Set}
@@ -167,8 +168,6 @@ class ReplicaAlterLogDirsThread(name: String,
       partitionMapLock.unlock()
     }
   }
-
-  override protected val isOffsetForLeaderEpochSupported: Boolean = true
 
   /**
    * Truncate the log for each partition based on current replica's returned epoch and offset.

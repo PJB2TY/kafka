@@ -27,6 +27,8 @@ import org.apache.kafka.raft.LeaderAndEpoch;
 import org.apache.kafka.raft.LeaderState;
 import org.apache.kafka.raft.LogOffsetMetadata;
 import org.apache.kafka.raft.RaftUtil;
+import org.apache.kafka.raft.ReplicaKey;
+import org.apache.kafka.raft.VoterSet;
 import org.apache.kafka.server.common.KRaftVersion;
 
 import java.util.Optional;
@@ -95,7 +97,7 @@ public final class UpdateVoterHandler {
 
         // Check that the leader has established a HWM and committed the current epoch
         Optional<Long> highWatermark = leaderState.highWatermark().map(LogOffsetMetadata::offset);
-        if (!highWatermark.isPresent()) {
+        if (highWatermark.isEmpty()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.updateVoterResponse(
                     Errors.REQUEST_TIMED_OUT,
@@ -128,7 +130,7 @@ public final class UpdateVoterHandler {
 
         // Check that there are no uncommitted VotersRecord
         Optional<LogHistory.Entry<VoterSet>> votersEntry = partitionState.lastVoterSetEntry();
-        if (!votersEntry.isPresent() || votersEntry.get().offset() >= highWatermark.get()) {
+        if (votersEntry.isEmpty() || votersEntry.get().offset() >= highWatermark.get()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.updateVoterResponse(
                     Errors.REQUEST_TIMED_OUT,
@@ -158,7 +160,7 @@ public final class UpdateVoterHandler {
         }
 
         // Check that endpoinds includes the default listener
-        if (!voterEndpoints.address(defaultListenerName).isPresent()) {
+        if (voterEndpoints.address(defaultListenerName).isEmpty()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.updateVoterResponse(
                     Errors.INVALID_REQUEST,
@@ -186,7 +188,7 @@ public final class UpdateVoterHandler {
                     )
                 )
             );
-        if (!updatedVoters.isPresent()) {
+        if (updatedVoters.isEmpty()) {
             return CompletableFuture.completedFuture(
                 RaftUtil.updateVoterResponse(
                     Errors.VOTER_NOT_FOUND,
